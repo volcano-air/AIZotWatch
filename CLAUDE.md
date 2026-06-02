@@ -32,6 +32,16 @@ uv run zotwatch watch --top 50
 
 # Push top recommendations back to Zotero
 uv run zotwatch watch --push
+
+# Generate target journal whitelist from library venues (LLM + Crossref)
+uv run zotwatch journals
+
+# Preview without writing, or feed more venues / a research focus
+uv run zotwatch journals --dry-run
+uv run zotwatch journals --top-venues 50 --research-focus "remote sensing of soil moisture"
+
+# Overwrite instead of merging with the existing whitelist
+uv run zotwatch journals --no-merge
 ```
 
 ## Architecture
@@ -70,6 +80,18 @@ src/zotwatch/
 - `data/faiss.index`: FAISS vector index for similarity search
 - `data/profile.json`: Profile summary with top authors, venues, and centroid vector
 - `data/embeddings.sqlite`: Embedding cache for reusing computed vectors
+- `data/journal_whitelist.csv`: Target journal whitelist (`issn,title,category,impact_factor`) used by both Crossref fetching and impact-factor scoring. Hand-maintainable, or generated via `zotwatch journals`
+
+### Journal Whitelist Generation (`zotwatch journals`)
+
+The `journals` command builds `data/journal_whitelist.csv` from the user's library:
+
+1. **Venue extraction** (`pipeline/profile_stats.py`): pulls the top venues from `profile.sqlite`
+2. **LLM proposal** (`llm/journal_recommender.py`): normalizes venue names to official titles, suggests related top journals, and estimates category + impact factor (the LLM does **not** supply ISSNs)
+3. **Crossref verification** (`pipeline/journal_builder.py`): resolves authoritative ISSNs per title via the Crossref `/journals` endpoint; titles not found on Crossref are skipped so every row has a real ISSN. One row is written per ISSN to maximize candidate matching
+4. **Merge + backup**: by default merges with the existing whitelist (manual entries are preserved) and backs up the old file to `*.csv.bak`
+
+Note: Crossref does not provide impact factors, so IF values come from the LLM and may be approximate.
 
 ### Configuration Files (config/)
 
