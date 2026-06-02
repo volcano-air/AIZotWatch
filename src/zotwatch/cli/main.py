@@ -10,9 +10,18 @@ from zotwatch import __version__
 from zotwatch.config import Settings, load_settings
 from zotwatch.infrastructure.embedding import EmbeddingCache, create_embedding_provider
 from zotwatch.infrastructure.storage import ArchiveStorage, ProfileStorage
+from zotwatch.llm import JournalRecommender, create_llm_client
 from zotwatch.output import render_archive, render_html, write_rss
 from zotwatch.output.push import ZoteroPusher
-from zotwatch.pipeline import ProfileBuilder, WatchConfig, WatchPipeline, WatchResult
+from zotwatch.pipeline import (
+    CrossrefJournalVerifier,
+    JournalWhitelistBuilder,
+    ProfileBuilder,
+    ProfileStatsExtractor,
+    WatchConfig,
+    WatchPipeline,
+    WatchResult,
+)
 from zotwatch.sources.zotero import ZoteroIngestor
 from zotwatch.utils.datetime import utc_today_start
 from zotwatch.utils.logging import setup_logging
@@ -382,4 +391,97 @@ def archive(ctx: click.Context, days: int, group_by: str) -> None:
             click.echo(f"Archive page ({view}): {archive_path}")
 
     click.echo(f"  Total: {stats['total']} papers, Must-read: {stats['must_read']}, Consider: {stats['consider']}")
+
+
+@cli.command()
+@click.option("--top-venues", default=30, help="Number of top library venues to feed the LLM")
+@click.option("--research-focus", default="", help="Optional research focus to steer recommendations")
+@click.option("--output", type=click.Path(), default=None, help="Output CSV path (default: data/journal_whitelist.csv)")
+@click.option("--merge/--no-merge", default=True, help="Preserve existing whitelist entries (default: merge)")
+@click.option("--dry-run", is_flag=True, help="Print the result without writing the file")
+@click.pass_context
+def journals(
+    ctx: click.Context,
+    top_venues: int,
+    research_focus: str,
+    output: str | None,
+    merge: bool,
+    dry_run: bool,
+) -> None:
+    """Generate the target journal whitelist from your Zotero library.
+
+    Extracts the most frequent venues from your library, asks the configured
+    LLM to normalize names and suggest related top journals, then resolves
+    authoritative ISSNs via Crossref. Journals not found on Crossref are
+    skipped so the whitelist only contains real ISSNs.
+    """
+    settings = _get_settings(ctx)
+    base_dir = ctx.obj["base_dir"]
+
+    if not settings.llm.enabled:
+        raise click.ClickException(
+            "LLM is disabled in config. Set llm.enabled: true to generate journals."
+        )
+
+    profile_db = base_dir / "data" / "profile.sqlite"
+    if not profile_db.exists():
+        raise click.ClickException("No profile found. Run 'zotwatch profile' first.")
+
+    storage = ProfileStorage(profile_db)
+    storage.initialize()
+    items = storage.get_all_items()
+    if not items:
+        raise click.ClickException("No items in library. Run 'zotwatch profile' first.")
+
+    # Extract venues from the library
+    extractor = ProfileStatsExtractor()
+    profile = extractor.extract_all(items)
+    venues = profile.venues[:top_venues]
+    if not venues:
+        raise click.ClickException("No venues found in library items.")
+    click.echo(f"Extracted {len(venues)} venues from library")
+
+    # Ask the LLM to generate a candidate journal list
+    llm = create_llm_client(settings.llm)
+    recommender = JournalRecommender(llm, model=settings.llm.model)
+    click.echo("Asking LLM to generate target journal list...")
+    generated = recommender.generate(
+        venues,
+        research_focus=research_focus,
+        max_tokens=max(settings.llm.max_tokens, 4096),
+    )
+    click.echo(f"LLM proposed {len(generated)} journals")
+    if not generated:
+        raise click.ClickException("LLM returned no journals. Try again or adjust --research-focus.")
+
+    # Verify on Crossref and write the whitelist
+    csv_path = Path(output) if output else profile_db.parent / "journal_whitelist.csv"
+    verifier = CrossrefJournalVerifier(mailto=settings.sources.crossref.mailto)
+    builder = JournalWhitelistBuilder(csv_path, verifier=verifier)
+
+    click.echo("Verifying journals against Crossref...")
+    result = builder.build(
+        generated,
+        merge=merge,
+        dry_run=dry_run,
+        on_progress=lambda msg: click.echo(f"  {msg}"),
+    )
+
+    click.echo("")
+    click.echo(f"Verified: {result.verified}, Skipped: {len(result.skipped)}")
+    if merge:
+        click.echo(f"Kept existing entries: {result.kept_existing}")
+    click.echo(f"Total whitelist rows: {len(result.entries)}")
+    if result.skipped:
+        click.echo(f"Skipped (not on Crossref): {', '.join(result.skipped)}")
+
+    if dry_run:
+        click.echo("\n[dry-run] No file written. Preview:")
+        for entry in result.entries[:30]:
+            if_str = "NA" if entry.impact_factor is None else f"{entry.impact_factor:g}"
+            click.echo(f"  {entry.issn} | {entry.title} | {entry.category} | IF={if_str}")
+    else:
+        if result.backup_path:
+            click.echo(f"Backed up existing whitelist to: {result.backup_path}")
+        click.echo(f"Whitelist written: {result.output_path}")
 

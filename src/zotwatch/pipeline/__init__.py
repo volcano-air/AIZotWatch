@@ -7,6 +7,12 @@ from .fetch import fetch_candidates
 from .filters import filter_recent, filter_without_abstract, limit_preprints
 from .ingest import ingest_zotero
 from .interest_ranker import InterestRanker
+from .journal_builder import (
+    BuildResult,
+    CrossrefJournalVerifier,
+    JournalEntry,
+    JournalWhitelistBuilder,
+)
 from .journal_scorer import JournalScorer
 from .profile import ProfileBuilder
 from .profile_clusterer import ProfileClusterer
@@ -26,6 +32,10 @@ __all__ = [
     "ProfileRanker",
     "InterestRanker",
     "JournalScorer",
+    "JournalWhitelistBuilder",
+    "CrossrefJournalVerifier",
+    "JournalEntry",
+    "BuildResult",
     # Clustering
     "ProfileClusterer",
     "ClusterScorer",

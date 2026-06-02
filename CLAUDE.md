@@ -32,6 +32,16 @@ uv run zotwatch watch --top 50
 
 # Push top recommendations back to Zotero
 uv run zotwatch watch --push
+
+# Generate target journal whitelist from library venues (LLM + Crossref)
+uv run zotwatch journals
+
+# Preview without writing, or feed more venues / a research focus
+uv run zotwatch journals --dry-run
+uv run zotwatch journals --top-venues 50 --research-focus "remote sensing of soil moisture"
+
+# Overwrite instead of merging with the existing whitelist
+uv run zotwatch journals --no-merge
 ```
 
 ## Architecture
@@ -70,6 +80,18 @@ src/zotwatch/
 - `data/faiss.index`: FAISS vector index for similarity search
 - `data/profile.json`: Profile summary with top authors, venues, and centroid vector
 - `data/embeddings.sqlite`: Embedding cache for reusing computed vectors
+- `data/journal_whitelist.csv`: Target journal whitelist (`issn,title,category,impact_factor`) used by both Crossref fetching and impact-factor scoring. Hand-maintainable, or generated via `zotwatch journals`
+
+### Journal Whitelist Generation (`zotwatch journals`)
+
+The `journals` command builds `data/journal_whitelist.csv` from the user's library:
+
+1. **Venue extraction** (`pipeline/profile_stats.py`): pulls the top venues from `profile.sqlite`
+2. **LLM proposal** (`llm/journal_recommender.py`): normalizes venue names to official titles, suggests related top journals, and estimates category + impact factor (the LLM does **not** supply ISSNs)
+3. **Crossref verification** (`pipeline/journal_builder.py`): resolves authoritative ISSNs per title via the Crossref `/journals` endpoint; titles not found on Crossref are skipped so every row has a real ISSN. One row is written per ISSN to maximize candidate matching
+4. **Merge + backup**: by default merges with the existing whitelist (manual entries are preserved) and backs up the old file to `*.csv.bak`
+
+Note: Crossref does not provide impact factors, so IF values come from the LLM and may be approximate.
 
 ### Configuration Files (config/)
 
@@ -257,7 +279,8 @@ Optional:
 
 - Preprint ratio is configurable via `watch.max_preprint_ratio` (default: 0.9)
 - Recent paper filter is configurable via `watch.recent_days` (default: 7 days)
-- GitHub Actions caches profile artifacts monthly to avoid full rebuilds
+- The profile is rebuilt incrementally, not daily: `watch` only re-embeds new/changed Zotero items (via `embeddings.sqlite`) and skips the FAISS rebuild entirely when the library is unchanged (`ProfileBuilder._can_skip_rebuild`). A full rebuild happens only when artifacts are missing or the embedding provider/model changes.
+- GitHub Actions persists profile artifacts across runs via `actions/cache` (restore/save split with a per-run key + `restore-keys` fallback), so the daily run reuses the cached profile. The daily cron also keeps the cache warm (GitHub evicts caches unused for 7 days); after a long gap the next run does one full rebuild.
 - AI summaries require LLM API key (`MOONSHOT_API_KEY`, `OPENROUTER_API_KEY`, or `DEEPSEEK_API_KEY`) and `llm.enabled: true` in config
 - Embedding and rerank providers must use the same provider when interests.enabled=true (both Voyage or both DashScope)
 - When writing code, please use English for all comments
