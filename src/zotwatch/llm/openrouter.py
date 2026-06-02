@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 class OpenRouterClient(BaseHTTPLLMClient):
     """OpenRouter API client supporting multiple LLM providers."""
 
-    BASE_URL = "http://107.173.181.24:8317/v1"
+    BASE_URL = "https://api.deepseek.com"
 
     def __init__(
         self,
